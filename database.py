@@ -84,6 +84,9 @@ async def init_db() -> None:
                 total_amount REAL NOT NULL,
                 status TEXT NOT NULL DEFAULT 'new',
                 closed_reason TEXT,
+                yandex_claim_id TEXT,
+                yandex_status TEXT,
+                yandex_updated_at TEXT,
                 name TEXT NOT NULL,
                 phone TEXT NOT NULL,
                 address TEXT NOT NULL,
@@ -118,6 +121,24 @@ async def init_db() -> None:
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS support_threads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL UNIQUE,
+                is_open INTEGER NOT NULL DEFAULT 1,
+                unread_admin INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS support_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL,
+                sender_role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (thread_id) REFERENCES support_threads(id)
             );
             """
         )
@@ -200,6 +221,12 @@ async def _migrate_schema(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE orders ADD COLUMN profile_id INTEGER")
     if "closed_reason" not in order_cols:
         await db.execute("ALTER TABLE orders ADD COLUMN closed_reason TEXT")
+    if "yandex_claim_id" not in order_cols:
+        await db.execute("ALTER TABLE orders ADD COLUMN yandex_claim_id TEXT")
+    if "yandex_status" not in order_cols:
+        await db.execute("ALTER TABLE orders ADD COLUMN yandex_status TEXT")
+    if "yandex_updated_at" not in order_cols:
+        await db.execute("ALTER TABLE orders ADD COLUMN yandex_updated_at TEXT")
 
     # Миграция старых статусов delivered/cancelled → closed
     await db.execute(
@@ -763,3 +790,166 @@ async def clear_database() -> None:
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
     await init_db()
+
+
+# ── Яндекс Доставка ────────────────────────────────────────────────────────
+
+
+async def set_order_yandex_claim(order_id: int, claim_id: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE orders SET yandex_claim_id = ?, yandex_status = NULL, yandex_updated_at = NULL
+            WHERE id = ?
+            """,
+            (claim_id.strip(), order_id),
+        )
+        await db.commit()
+
+
+async def update_order_yandex(
+    order_id: int, yandex_status: str, updated_at: str = ""
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE orders SET yandex_status = ?, yandex_updated_at = ?
+            WHERE id = ?
+            """,
+            (yandex_status, updated_at, order_id),
+        )
+        await db.commit()
+
+
+async def get_orders_for_yandex_sync() -> list[dict[str, Any]]:
+    """Активные заказы с привязанным claim_id Яндекс."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT o.*, u.telegram_id, u.username
+            FROM orders o
+            JOIN users u ON o.user_id = u.id
+            WHERE o.yandex_claim_id IS NOT NULL
+              AND o.yandex_claim_id != ''
+              AND o.status != 'closed'
+            ORDER BY o.id
+            """
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+# ── Рассылка ────────────────────────────────────────────────────────────────
+
+
+async def get_all_telegram_ids() -> list[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT telegram_id FROM users ORDER BY id"
+        )
+        return [row[0] for row in await cursor.fetchall()]
+
+
+# ── Поддержка ───────────────────────────────────────────────────────────────
+
+
+async def get_or_create_support_thread(user_id: int) -> dict[str, Any]:
+    now = datetime.now().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM support_threads WHERE user_id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        if row:
+            return dict(row)
+        cursor = await db.execute(
+            """
+            INSERT INTO support_threads (user_id, is_open, unread_admin, updated_at)
+            VALUES (?, 1, 0, ?)
+            """,
+            (user_id, now),
+        )
+        await db.commit()
+        thread_id = cursor.lastrowid
+        return {
+            "id": thread_id,
+            "user_id": user_id,
+            "is_open": 1,
+            "unread_admin": 0,
+            "updated_at": now,
+        }
+
+
+async def add_support_message(
+    thread_id: int, sender_role: str, text: str
+) -> None:
+    now = datetime.now().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO support_messages (thread_id, sender_role, text, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (thread_id, sender_role, text, now),
+        )
+        unread_delta = 1 if sender_role == "user" else 0
+        await db.execute(
+            """
+            UPDATE support_threads
+            SET updated_at = ?, unread_admin = unread_admin + ?
+            WHERE id = ?
+            """,
+            (now, unread_delta, thread_id),
+        )
+        await db.commit()
+
+
+async def get_open_support_threads() -> list[dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT t.*, u.telegram_id, u.username
+            FROM support_threads t
+            JOIN users u ON t.user_id = u.id
+            WHERE t.is_open = 1
+            ORDER BY t.unread_admin DESC, t.updated_at DESC
+            """
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_support_thread_by_user(user_id: int) -> dict[str, Any] | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT t.*, u.telegram_id, u.username
+            FROM support_threads t
+            JOIN users u ON t.user_id = u.id
+            WHERE t.user_id = ?
+            """,
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def mark_support_read(thread_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE support_threads SET unread_admin = 0 WHERE id = ?",
+            (thread_id,),
+        )
+        await db.commit()
+
+
+async def close_support_thread(thread_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE support_threads SET is_open = 0 WHERE id = ?",
+            (thread_id,),
+        )
+        await db.commit()
+

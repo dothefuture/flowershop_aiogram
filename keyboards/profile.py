@@ -1,12 +1,37 @@
 """
-Клавиатуры для профилей доставки и выбора при оформлении заказа.
+Клавиатуры профиля: адреса, заказы, счета.
 """
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
+def profile_hub_kb() -> InlineKeyboardMarkup:
+    """Главное меню раздела «Профиль»."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📋 Адреса доставки",
+                    callback_data="profile:addresses",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📖 История заказов",
+                    callback_data="profile:orders",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💳 Счета",
+                    callback_data="profile:billing",
+                )
+            ],
+        ]
+    )
+
+
 def profiles_menu_kb(profiles: list[dict]) -> InlineKeyboardMarkup:
-    """Меню управления профилями."""
     rows = [
         [
             InlineKeyboardButton(
@@ -17,18 +42,15 @@ def profiles_menu_kb(profiles: list[dict]) -> InlineKeyboardMarkup:
         for p in profiles
     ]
     rows.append(
-        [
-            InlineKeyboardButton(
-                text="➕ Новый профиль",
-                callback_data="profile:add",
-            )
-        ]
+        [InlineKeyboardButton(text="➕ Новый профиль", callback_data="profile:add")]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="◀️ В профиль", callback_data="profile:hub")]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def profile_detail_kb(profile_id: int) -> InlineKeyboardMarkup:
-    """Действия над профилем."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -45,8 +67,8 @@ def profile_detail_kb(profile_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="◀️ К списку",
-                    callback_data="profile:list",
+                    text="◀️ К адресам",
+                    callback_data="profile:addresses",
                 )
             ],
         ]
@@ -54,7 +76,6 @@ def profile_detail_kb(profile_id: int) -> InlineKeyboardMarkup:
 
 
 def profile_edit_fields_kb(profile_id: int) -> InlineKeyboardMarkup:
-    """Выбор поля для редактирования профиля."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -87,8 +108,15 @@ def profile_edit_fields_kb(profile_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def profile_back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ В профиль", callback_data="profile:hub")]
+        ]
+    )
+
+
 def checkout_profile_kb(profiles: list[dict]) -> InlineKeyboardMarkup:
-    """Выбор профиля при оформлении заказа."""
     rows = [
         [
             InlineKeyboardButton(
@@ -99,19 +127,9 @@ def checkout_profile_kb(profiles: list[dict]) -> InlineKeyboardMarkup:
         for p in profiles
     ]
     rows.append(
-        [
-            InlineKeyboardButton(
-                text="➕ Новый профиль",
-                callback_data="order:profile:new",
-            )
-        ]
+        [InlineKeyboardButton(text="➕ Новый профиль", callback_data="order:profile:new")]
     )
     rows.append(
-        [
-            InlineKeyboardButton(
-                text="❌ Отмена",
-                callback_data="order:profile:cancel",
-            )
-        ]
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="order:profile:cancel")]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -52,3 +52,28 @@ class AdminSeasonalStates(StatesGroup):
     """Настройка сезонного раздела."""
 
     color = State()
+
+
+class AdminBroadcastStates(StatesGroup):
+    """Рассылка сообщения всем пользователям."""
+
+    message = State()
+    confirm = State()
+
+
+class AdminSupportStates(StatesGroup):
+    """Ответ пользователю в поддержке."""
+
+    reply = State()
+
+
+class AdminYandexStates(StatesGroup):
+    """Привязка заявки Яндекс Доставки к заказу."""
+
+    claim_id = State()
+
+
+class SupportStates(StatesGroup):
+    """Чат пользователя с поддержкой."""
+
+    chatting = State()

@@ -1,5 +1,5 @@
 """
-Профили доставки — создание, просмотр, редактирование и удаление.
+Профиль: адреса доставки, история заказов и счета.
 """
 
 import re
@@ -9,18 +9,30 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from database import (
+    BILLING_STATUSES,
     create_profile,
     delete_profile,
+    format_order_status,
     get_or_create_user,
     get_profile,
+    get_user_billing,
+    get_user_orders,
     get_user_profiles,
     update_profile_field,
 )
-from utils.auth import is_admin
 from keyboards.main import main_menu_kb
-from keyboards.profile import profile_detail_kb, profile_edit_fields_kb, profiles_menu_kb
+from keyboards.profile import (
+    profile_back_kb,
+    profile_detail_kb,
+    profile_edit_fields_kb,
+    profile_hub_kb,
+    profiles_menu_kb,
+)
+from services.yandex_delivery import format_yandex_status
 from states import ProfileStates
-from texts import PROFILE_EMPTY
+from texts import BILLING_EMPTY, BILLING_HEADER, PROFILE_EMPTY
+from utils.auth import is_admin
+from utils.pricing import format_rub
 
 router = Router(name="profile")
 
@@ -36,36 +48,89 @@ def _profile_text(profile: dict) -> str:
     )
 
 
-@router.message(F.text == "👤 Профили")
-async def show_profiles(message: Message) -> None:
-    """Список профилей пользователя."""
-    user = await get_or_create_user(message.from_user.id)
-    profiles = await get_user_profiles(user["id"])
+def _orders_text(active: list, closed: list) -> str:
+    if not active and not closed:
+        return "📖 <b>История заказов</b>\n\nУ вас пока нет заказов."
+    lines = ["📖 <b>История заказов</b>\n"]
+    if active:
+        lines.append("<b>Активные:</b>")
+        for order in active:
+            yandex = ""
+            if order.get("yandex_status"):
+                yandex = f"\n   🚕 {format_yandex_status(order['yandex_status'])}"
+            lines.append(
+                f"🔹 <b>#{order['id']}</b> · {order['created_at'][:10]}\n"
+                f"   💰 {format_rub(order['total_amount'])} · "
+                f"{format_order_status(order)}{yandex}\n"
+            )
+    if closed:
+        lines.append("\n<b>🔒 Закрытые:</b>")
+        for order in closed:
+            lines.append(
+                f"🔹 <b>#{order['id']}</b> · {order['created_at'][:10]}\n"
+                f"   💰 {format_rub(order['total_amount'])} · "
+                f"{format_order_status(order)}\n"
+            )
+    return "\n".join(lines)
 
-    if not profiles:
-        await message.answer(
-            PROFILE_EMPTY,
-            reply_markup=profiles_menu_kb([]),
-            parse_mode="HTML",
+
+def _billing_text(records: list) -> str:
+    if not records:
+        return BILLING_EMPTY
+    lines = [BILLING_HEADER]
+    for rec in records:
+        status = BILLING_STATUSES.get(rec["status"], rec["status"])
+        date = rec["created_at"][:10]
+        paid = (
+            f"\n   ✅ Дата оплаты: {rec['paid_at'][:10]}"
+            if rec.get("paid_at")
+            else ""
         )
-        return
+        lines.append(
+            f"🔹 <b>Счёт #{rec['id']}</b> · заказ #{rec['order_id']}\n"
+            f"   💰 {format_rub(rec['amount'])} · {status}\n"
+            f"   📅 Создан: {date}{paid}\n"
+        )
+    return "\n".join(lines)
 
+
+@router.message(F.text == "💳 Счета")
+@router.message(F.text == "💳 Биллинг")
+@router.message(F.text == "📖 История заказов")
+async def legacy_menu_redirect(message: Message) -> None:
+    """Старые кнопки меню → профиль."""
+    await show_profile_hub(message)
+
+
+@router.message(F.text == "👤 Профиль")
+@router.message(F.text == "👤 Профили")
+async def show_profile_hub(message: Message) -> None:
+    await get_or_create_user(message.from_user.id, username=message.from_user.username)
     await message.answer(
-        "👤 <b>Ваши профили доставки</b>\n\n"
-        "Выберите профиль для просмотра или редактирования:",
-        reply_markup=profiles_menu_kb(profiles),
+        "👤 <b>Личный кабинет</b>\n\nВыберите раздел:",
+        reply_markup=profile_hub_kb(),
         parse_mode="HTML",
     )
 
 
-@router.callback_query(F.data == "profile:list")
-async def profile_list(callback: CallbackQuery) -> None:
+@router.callback_query(F.data == "profile:hub")
+async def profile_hub(callback: CallbackQuery) -> None:
+    await callback.message.edit_text(
+        "👤 <b>Личный кабинет</b>\n\nВыберите раздел:",
+        reply_markup=profile_hub_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:addresses")
+async def profile_addresses(callback: CallbackQuery) -> None:
     user = await get_or_create_user(callback.from_user.id)
     profiles = await get_user_profiles(user["id"])
     text = (
         PROFILE_EMPTY
         if not profiles
-        else "👤 <b>Ваши профили доставки</b>\n\nВыберите профиль:"
+        else "📋 <b>Адреса доставки</b>\n\nВыберите профиль:"
     )
     await callback.message.edit_text(
         text,
@@ -75,6 +140,36 @@ async def profile_list(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "profile:orders")
+async def profile_orders(callback: CallbackQuery) -> None:
+    user = await get_or_create_user(callback.from_user.id)
+    active = await get_user_orders(user["id"], closed_only=False)
+    closed = await get_user_orders(user["id"], closed_only=True)
+    await callback.message.edit_text(
+        _orders_text(active, closed),
+        reply_markup=profile_back_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:billing")
+async def profile_billing(callback: CallbackQuery) -> None:
+    user = await get_or_create_user(callback.from_user.id)
+    records = await get_user_billing(user["id"])
+    await callback.message.edit_text(
+        _billing_text(records),
+        reply_markup=profile_back_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:list")
+async def profile_list(callback: CallbackQuery) -> None:
+    await profile_addresses(callback)
+
+
 @router.callback_query(F.data.startswith("profile:view:"))
 async def profile_view(callback: CallbackQuery) -> None:
     profile_id = int(callback.data.split(":")[-1])
@@ -82,7 +177,6 @@ async def profile_view(callback: CallbackQuery) -> None:
     if not profile:
         await callback.answer("Профиль не найден", show_alert=True)
         return
-
     await callback.message.edit_text(
         _profile_text(profile),
         reply_markup=profile_detail_kb(profile_id),
@@ -140,10 +234,9 @@ async def profile_add_address(message: Message, state: FSMContext) -> None:
     if len(address) < 5:
         await message.answer("Адрес слишком короткий:")
         return
-
     data = await state.get_data()
     user = await get_or_create_user(message.from_user.id)
-    profile_id = await create_profile(
+    await create_profile(
         user_id=user["id"],
         title=data["title"],
         name=data["name"],
@@ -151,14 +244,13 @@ async def profile_add_address(message: Message, state: FSMContext) -> None:
         address=address,
     )
     await state.clear()
-
     profiles = await get_user_profiles(user["id"])
     await message.answer(
         f"✅ Профиль «{data['title']}» создан!",
         reply_markup=main_menu_kb(is_admin=is_admin(message.from_user.id)),
     )
     await message.answer(
-        "👤 <b>Ваши профили</b>",
+        "📋 <b>Адреса доставки</b>",
         reply_markup=profiles_menu_kb(profiles),
         parse_mode="HTML",
     )
@@ -178,8 +270,7 @@ async def profile_edit_menu(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("profile:edit_field:"))
 async def profile_edit_field_select(callback: CallbackQuery, state: FSMContext) -> None:
     parts = callback.data.split(":")
-    profile_id = int(parts[2])
-    field = parts[3]
+    profile_id, field = int(parts[2]), parts[3]
     labels = {
         "title": "название профиля",
         "name": "имя",
@@ -195,10 +286,8 @@ async def profile_edit_field_select(callback: CallbackQuery, state: FSMContext) 
 @router.message(ProfileStates.edit_value)
 async def profile_edit_value(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    profile_id = data["edit_profile_id"]
-    field = data["edit_field"]
+    profile_id, field = data["edit_profile_id"], data["edit_field"]
     value = message.text.strip()
-
     if field == "phone" and not PHONE_PATTERN.match(value):
         await message.answer("Некорректный номер.")
         return
@@ -208,7 +297,6 @@ async def profile_edit_value(message: Message, state: FSMContext) -> None:
     if field == "address" and len(value) < 5:
         await message.answer("Адрес слишком короткий.")
         return
-
     await update_profile_field(profile_id, field, value)
     await state.clear()
     profile = await get_profile(profile_id)
@@ -230,12 +318,11 @@ async def profile_delete(callback: CallbackQuery) -> None:
     profile = await get_profile(profile_id)
     if profile:
         await delete_profile(profile_id)
-
     user = await get_or_create_user(callback.from_user.id)
     profiles = await get_user_profiles(user["id"])
     await callback.message.edit_text(
-        f"🗑 Профиль «{profile['title'] if profile else profile_id}» удалён.\n\n"
-        + ("👤 <b>Ваши профили</b>" if profiles else PROFILE_EMPTY),
+        f"🗑 Профиль удалён.\n\n"
+        + ("📋 <b>Адреса доставки</b>" if profiles else PROFILE_EMPTY),
         reply_markup=profiles_menu_kb(profiles),
         parse_mode="HTML",
     )

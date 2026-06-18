@@ -8,6 +8,7 @@ Telegram-бот «Магазин цветов» на aiogram 3.x + Mini App ка
 """
 
 import asyncio
+import contextlib
 import logging
 import sys
 
@@ -20,6 +21,7 @@ from bot_setup import setup_bot
 from config import load_config
 from database import init_db
 from handlers import register_handlers
+from services.yandex_sync import yandex_sync_loop
 from webserver import start_web_server
 
 logging.basicConfig(
@@ -46,10 +48,15 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     register_handlers(dp)
 
+    sync_task = asyncio.create_task(yandex_sync_loop(bot))
+
     logger.info("Бот запущен. Mini App: %s", config.webapp_url)
     try:
         await dp.start_polling(bot)
     finally:
+        sync_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sync_task
         await web_runner.cleanup()
 
 

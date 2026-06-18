@@ -50,6 +50,18 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
                     callback_data="admin:billing",
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text="📢 Рассылка",
+                    callback_data="admin:broadcast",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💬 Поддержка",
+                    callback_data="admin:support",
+                )
+            ],
         ]
     )
 
@@ -272,8 +284,15 @@ def admin_order_status_kb(order_id: int, order: dict) -> InlineKeyboardMarkup:
                 )
             ]
         )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🚕 Привязать Яндекс",
+                    callback_data=f"admin:yandex_link:{order_id}",
+                )
+            ]
+        )
     else:
-        reason = order.get("closed_reason") or ""
         label = format_order_status(order)
         rows.append(
             [
@@ -326,3 +345,43 @@ def admin_seasonal_kb(color: str, enabled: bool) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def admin_broadcast_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Отправить всем",
+                    callback_data="admin:broadcast:send",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="admin:broadcast:cancel",
+                ),
+            ]
+        ]
+    )
+
+
+def admin_support_threads_kb(threads: list[dict]) -> InlineKeyboardMarkup:
+    from utils.formatting import format_telegram_client
+
+    rows = []
+    for t in threads:
+        tag = format_telegram_client(t.get("username"))
+        unread = f" ({t['unread_admin']} нов.)" if t.get("unread_admin") else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"💬 {tag}{unread}",
+                    callback_data=f"admin:support_reply:{t['user_id']}",
+                )
+            ]
+        )
+    if not rows:
+        rows.append(
+            [InlineKeyboardButton(text="— обращений нет —", callback_data="admin:noop")]
+        )
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

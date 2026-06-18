@@ -81,3 +81,22 @@ async def notify_customer_order_closed(
         await bot.send_message(telegram_id, text, parse_mode="HTML")
     except Exception:
         pass
+
+
+async def notify_yandex_status_change(
+    bot: Bot,
+    telegram_id: int,
+    order_id: int,
+    yandex_status: str,
+) -> None:
+    from services.yandex_delivery import format_yandex_status
+    from texts import YANDEX_STATUS_NOTIFY
+
+    text = YANDEX_STATUS_NOTIFY.format(
+        order_id=order_id,
+        yandex_status=format_yandex_status(yandex_status),
+    )
+    try:
+        await bot.send_message(telegram_id, text, parse_mode="HTML")
+    except Exception:
+        pass

@@ -10,6 +10,7 @@ from database import (
     BILLING_STATUSES,
     ORDER_STATUSES,
     add_product,
+    add_support_message,
     close_order,
     delete_order,
     delete_product,
@@ -17,11 +18,16 @@ from database import (
     get_all_billing,
     get_all_orders,
     get_all_products,
+    get_all_telegram_ids,
     get_billing_stats,
+    get_open_support_threads,
     get_order,
     get_order_items,
     get_product,
     get_seasonal_settings,
+    get_support_thread_by_user,
+    mark_support_read,
+    set_order_yandex_claim,
     set_setting,
     set_product_discount,
     toggle_product_active,
@@ -31,6 +37,7 @@ from database import (
 )
 from utils.auth import is_admin
 from keyboards.admin import (
+    admin_broadcast_confirm_kb,
     admin_discount_kb,
     admin_edit_fields_kb,
     admin_menu_kb,
@@ -39,16 +46,26 @@ from keyboards.admin import (
     admin_product_actions_kb,
     admin_products_kb,
     admin_seasonal_kb,
+    admin_support_threads_kb,
 )
 from keyboards.main import main_menu_kb
 from notifications import (
     notify_customer_order_closed,
     notify_customer_status_change,
 )
-from states import AdminAddProductStates, AdminDiscountStates, AdminEditProductStates, AdminSeasonalStates
-from texts import ADMIN_PANEL, ADMIN_PRODUCTS_HEADER
+from states import (
+    AdminAddProductStates,
+    AdminBroadcastStates,
+    AdminDiscountStates,
+    AdminEditProductStates,
+    AdminSeasonalStates,
+    AdminSupportStates,
+    AdminYandexStates,
+)
+from texts import ADMIN_PANEL, ADMIN_PRODUCTS_HEADER, BROADCAST_DONE, BROADCAST_PREVIEW, SUPPORT_ADMIN_REPLY_SENT
 from utils.formatting import format_telegram_client
 from utils.pricing import effective_price, format_price_line, format_rub
+from services.yandex_delivery import format_yandex_status, get_yandex_client
 
 router = Router(name="admin")
 
@@ -533,9 +550,14 @@ def _order_detail_text(order_id: int, order: dict, items: list) -> str:
         f"📍 {order['address']}",
         f"💬 Клиент TG: {format_telegram_client(order.get('username'), html=True)}",
         f"📅 {order['created_at'][:16]}",
-        f"Статус: {status}\n",
-        "<b>Позиции:</b>",
+        f"Статус: {status}",
     ]
+    if order.get("yandex_claim_id"):
+        lines.append(
+            f"🚕 Яндекс: <code>{order['yandex_claim_id']}</code>\n"
+            f"   {format_yandex_status(order.get('yandex_status'))}"
+        )
+    lines.append("\n<b>Позиции:</b>")
     for item in items:
         lines.append(
             f"• {item['product_name']} — {item['quantity']} × {format_rub(item['price'])}"
@@ -716,3 +738,193 @@ async def admin_billing(callback: CallbackQuery, state: FSMContext) -> None:
         parse_mode="HTML",
     )
     await callback.answer()
+
+
+# ── Яндекс Доставка ────────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("admin:yandex_link:"))
+async def admin_yandex_link_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    order_id = int(callback.data.split(":")[-1])
+    await state.update_data(yandex_order_id=order_id)
+    await state.set_state(AdminYandexStates.claim_id)
+    await callback.message.answer(
+        f"🚕 Введите <b>claim_id</b> заявки Яндекс Доставки для заказа #{order_id}:",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminYandexStates.claim_id)
+async def admin_yandex_link_save(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    claim_id = message.text.strip()
+    if len(claim_id) < 8:
+        await message.answer("❌ Некорректный claim_id. Попробуйте снова:")
+        return
+    data = await state.get_data()
+    order_id = data["yandex_order_id"]
+    await set_order_yandex_claim(order_id, claim_id)
+
+    client = get_yandex_client()
+    yandex_label = "—"
+    if client:
+        info = await client.get_claim_info(claim_id)
+        if info and info.get("status"):
+            from database import update_order_yandex
+
+            await update_order_yandex(order_id, info["status"], info.get("updated_ts", ""))
+            yandex_label = format_yandex_status(info["status"])
+
+    await state.clear()
+    await message.answer(
+        f"✅ Заказ #{order_id} привязан к Яндекс: <code>{claim_id}</code>\n"
+        f"Статус: {yandex_label}\n\n"
+        "<i>Статус будет обновляться автоматически.</i>",
+        reply_markup=main_menu_kb(is_admin=True),
+        parse_mode="HTML",
+    )
+
+
+# ── Рассылка ────────────────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data == "admin:broadcast")
+async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    await state.set_state(AdminBroadcastStates.message)
+    await callback.message.answer(
+        "📢 <b>Рассылка</b>\n\nВведите текст сообщения для всех пользователей:",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminBroadcastStates.message)
+async def admin_broadcast_preview(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if len(text) < 2:
+        await message.answer("Слишком короткое сообщение.")
+        return
+    recipients = await get_all_telegram_ids()
+    await state.update_data(broadcast_text=text)
+    await state.set_state(AdminBroadcastStates.confirm)
+    await message.answer(
+        BROADCAST_PREVIEW.format(count=len(recipients), message=text),
+        reply_markup=admin_broadcast_confirm_kb(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "admin:broadcast:cancel")
+async def admin_broadcast_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.message.edit_text("Рассылка отменена.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:broadcast:send")
+async def admin_broadcast_send(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    import asyncio
+
+    data = await state.get_data()
+    text = data.get("broadcast_text", "")
+    await state.clear()
+    recipients = await get_all_telegram_ids()
+    ok, fail = 0, 0
+    for tg_id in recipients:
+        try:
+            await callback.bot.send_message(tg_id, text, parse_mode="HTML")
+            ok += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.05)
+
+    await callback.message.edit_text(
+        BROADCAST_DONE.format(ok=ok, fail=fail),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# ── Поддержка (админ) ────────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data == "admin:support")
+async def admin_support_list(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    await state.clear()
+    threads = await get_open_support_threads()
+    await callback.message.edit_text(
+        "💬 <b>Поддержка</b>\n\nВыберите диалог для ответа:",
+        reply_markup=admin_support_threads_kb(threads),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:support_reply:"))
+async def admin_support_reply_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    user_db_id = int(callback.data.split(":")[-1])
+    thread = await get_support_thread_by_user(user_db_id)
+    if not thread:
+        await callback.answer("Диалог не найден", show_alert=True)
+        return
+    await mark_support_read(thread["id"])
+    await state.set_state(AdminSupportStates.reply)
+    await state.update_data(
+        support_thread_id=thread["id"],
+        support_telegram_id=thread["telegram_id"],
+    )
+    tag = format_telegram_client(thread.get("username"))
+    await callback.message.answer(
+        f"💬 Ответ клиенту {tag}\n\nВведите сообщение (или /cancel для отмены):",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminSupportStates.reply, F.text == "/cancel")
+async def admin_support_reply_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Ответ отменён.", reply_markup=main_menu_kb(is_admin=True))
+
+
+@router.message(AdminSupportStates.reply, F.text)
+async def admin_support_reply_send(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    thread_id = data["support_thread_id"]
+    telegram_id = data["support_telegram_id"]
+    text = message.text.strip()
+    await add_support_message(thread_id, "admin", text)
+    try:
+        await message.bot.send_message(
+            telegram_id,
+            f"💬 <b>Ответ поддержки:</b>\n\n{text}",
+            parse_mode="HTML",
+        )
+    except Exception:
+        await message.answer("❌ Не удалось доставить сообщение клиенту.")
+        return
+    await message.answer(
+        SUPPORT_ADMIN_REPLY_SENT, reply_markup=main_menu_kb(is_admin=True)
+    )
+    await state.clear()
