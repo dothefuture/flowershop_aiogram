@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Цветочный рай</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="header">
+    <h1>🌸 Цветочный рай</h1>
+    <p class="subtitle">Свежие букеты с доставкой</p>
+  </header>
+
+  <section id="seasonal-section" class="seasonal hidden">
+    <h2 id="seasonal-title">СЕЗОННОЕ</h2>
+    <div id="seasonal-grid" class="grid"></div>
+  </section>
+
+  <section class="catalog">
+    <h2>Каталог</h2>
+    <div id="catalog-grid" class="grid"></div>
+  </section>
+
+  <div id="loader" class="loader">Загрузка…</div>
+  <div id="empty" class="empty hidden">Каталог пока пуст 🌷</div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
