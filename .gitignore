@@ -4,6 +4,7 @@
 # База данных
 *.db
 
+
 # Python
 __pycache__/
 *.py[cod]
@@ -13,6 +14,7 @@ venv/
 test-old-venv/
 test-venv/
 env/
+.env.example
 
 # IDE
 .idea/
