@@ -61,7 +61,7 @@ async def start_support(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(SupportStates.chatting, F.text == "❌ Завершить чат")
+@router.message(SupportStates.chatting, F.text == "↩️ Завершить чат")
 async def end_support(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(

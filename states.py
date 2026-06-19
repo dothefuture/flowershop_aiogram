@@ -14,6 +14,7 @@ class OrderStates(StatesGroup):
     phone = State()
     address = State()
     confirm = State()
+    payment = State()
 
 
 class ProfileStates(StatesGroup):
@@ -24,6 +25,7 @@ class ProfileStates(StatesGroup):
     phone = State()
     address = State()
     edit_value = State()
+    topup_amount = State()
 
 
 class AdminAddProductStates(StatesGroup):
@@ -52,6 +54,8 @@ class AdminSeasonalStates(StatesGroup):
     """Настройка сезонного раздела."""
 
     color = State()
+    emoji = State()
+    title = State()
 
 
 class AdminBroadcastStates(StatesGroup):
@@ -59,6 +63,12 @@ class AdminBroadcastStates(StatesGroup):
 
     message = State()
     confirm = State()
+
+
+class SupportStates(StatesGroup):
+    """Чат поддержки пользователя."""
+
+    chatting = State()
 
 
 class AdminSupportStates(StatesGroup):
@@ -73,7 +83,15 @@ class AdminYandexStates(StatesGroup):
     claim_id = State()
 
 
-class SupportStates(StatesGroup):
-    """Чат пользователя с поддержкой."""
+class AdminWelcomeStates(StatesGroup):
+    """Главное меню — картинка и текст."""
 
-    chatting = State()
+    photo = State()
+    text = State()
+
+
+class AdminAIStates(StatesGroup):
+    """Дополнение описания товара через AI."""
+
+    hint = State()
+    confirm = State()

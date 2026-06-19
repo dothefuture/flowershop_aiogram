@@ -22,7 +22,7 @@ from config import load_config
 from database import init_db
 from handlers import register_handlers
 from services.yandex_sync import yandex_sync_loop
-from webserver import start_web_server
+from webserver import set_webhook_bot, start_web_server
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +45,7 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     await setup_bot(bot, config)
+    set_webhook_bot(bot)
     dp = Dispatcher(storage=MemoryStorage())
     register_handlers(dp)
 

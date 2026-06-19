@@ -26,13 +26,17 @@ async def notify_admin_new_order(
     total: float,
     *,
     client_username: str | None = None,
+    paid: bool = False,
+    yandex_info: str = "",
 ) -> None:
-    """Отправляет администраторам уведомление о новом заказе."""
+    """Отправляет администраторам уведомление о заказе."""
     items_text = "\n".join(
         f"• {item['product_name']} — {item['quantity']} × {format_rub(item['price'])}"
         for item in items
     )
+    header = "🔔 <b>Оплаченный заказ" if paid else "🔔 <b>Новый заказ"
     text = ADMIN_NEW_ORDER.format(
+        header=header,
         order_id=order_id,
         client_tag=format_telegram_client(client_username),
         name=name,
@@ -40,10 +44,27 @@ async def notify_admin_new_order(
         address=address,
         items=items_text,
         total=total,
+        extra=f"\n{yandex_info}" if yandex_info else "",
     )
     try:
         for admin_id in get_admin_ids():
             await bot.send_message(admin_id, text, parse_mode="HTML")
+    except Exception:
+        pass
+
+
+async def notify_payment_received(
+    bot: Bot,
+    telegram_id: int,
+    order_id: int,
+    *,
+    yandex_info: str = "",
+) -> None:
+    from texts import PAYMENT_SUCCESS
+
+    text = PAYMENT_SUCCESS.format(order_id=order_id, yandex_info=yandex_info)
+    try:
+        await bot.send_message(telegram_id, text, parse_mode="HTML")
     except Exception:
         pass
 

@@ -19,6 +19,6 @@ def main_menu_kb(*, is_admin: bool = False) -> ReplyKeyboardMarkup:
 
 def support_chat_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="❌ Завершить чат")]],
+        keyboard=[[KeyboardButton(text="↩️ Завершить чат")]],
         resize_keyboard=True,
     )

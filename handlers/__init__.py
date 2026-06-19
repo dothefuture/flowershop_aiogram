@@ -3,6 +3,7 @@
 """
 
 from handlers.admin import router as admin_router
+from handlers.admin_balance import router as admin_balance_router
 from handlers.cart import router as cart_router
 from handlers.catalog import router as catalog_router
 from handlers.order import router as order_router
@@ -19,4 +20,5 @@ def register_handlers(dp) -> None:
     dp.include_router(cart_router)
     dp.include_router(order_router)
     dp.include_router(profile_router)
+    dp.include_router(admin_balance_router)
     dp.include_router(admin_router)

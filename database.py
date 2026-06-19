@@ -28,14 +28,16 @@ ACTIVE_ORDER_STATUSES = ("new", "in_progress")
 CLOSURE_ACTIONS = ("delivered", "cancelled")
 
 BILLING_STATUSES = {
-    "pending": "⏳ К оплате при получении",
-    "paid": "✅ Оплачен (заказ доставлен)",
+    "pending": "⏳ Ожидает оплаты",
+    "paid": "✅ Оплачен",
 }
 
 DEFAULT_SETTINGS = {
     "seasonal_color": "#FF6B35",
     "seasonal_title": "СЕЗОННОЕ",
+    "seasonal_emoji": "🍂",
     "seasonal_enabled": "1",
+    "welcome_text": "",
 }
 
 
@@ -112,6 +114,8 @@ async def init_db() -> None:
                 user_id INTEGER NOT NULL,
                 amount REAL NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
+                lava_invoice_id TEXT,
+                payment_url TEXT,
                 created_at TEXT NOT NULL,
                 paid_at TEXT,
                 FOREIGN KEY (order_id) REFERENCES orders(id),
@@ -139,6 +143,18 @@ async def init_db() -> None:
                 text TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (thread_id) REFERENCES support_threads(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS balance_topups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                lava_invoice_id TEXT,
+                payment_url TEXT,
+                created_at TEXT NOT NULL,
+                paid_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
             );
             """
         )
@@ -214,6 +230,12 @@ async def _migrate_schema(db: aiosqlite.Connection) -> None:
     user_cols = {row[1] for row in await cursor.fetchall()}
     if "username" not in user_cols:
         await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
+    if "balance" not in user_cols:
+        await db.execute(
+            "ALTER TABLE users ADD COLUMN balance REAL NOT NULL DEFAULT 0"
+        )
+    if "default_profile_id" not in user_cols:
+        await db.execute("ALTER TABLE users ADD COLUMN default_profile_id INTEGER")
 
     cursor = await db.execute("PRAGMA table_info(orders)")
     order_cols = {row[1] for row in await cursor.fetchall()}
@@ -227,6 +249,15 @@ async def _migrate_schema(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE orders ADD COLUMN yandex_status TEXT")
     if "yandex_updated_at" not in order_cols:
         await db.execute("ALTER TABLE orders ADD COLUMN yandex_updated_at TEXT")
+
+    cursor = await db.execute("PRAGMA table_info(billing)")
+    billing_cols = {row[1] for row in await cursor.fetchall()}
+    if "lava_invoice_id" not in billing_cols:
+        await db.execute("ALTER TABLE billing ADD COLUMN lava_invoice_id TEXT")
+    if "payment_url" not in billing_cols:
+        await db.execute("ALTER TABLE billing ADD COLUMN payment_url TEXT")
+    if "payment_method" not in billing_cols:
+        await db.execute("ALTER TABLE billing ADD COLUMN payment_method TEXT")
 
     # Миграция старых статусов delivered/cancelled → closed
     await db.execute(
@@ -300,6 +331,7 @@ async def get_seasonal_settings() -> dict[str, str]:
     return {
         "color": await get_setting("seasonal_color", DEFAULT_SETTINGS["seasonal_color"]),
         "title": await get_setting("seasonal_title", DEFAULT_SETTINGS["seasonal_title"]),
+        "emoji": await get_setting("seasonal_emoji", DEFAULT_SETTINGS["seasonal_emoji"]),
         "enabled": await get_setting("seasonal_enabled", "1"),
     }
 
@@ -379,6 +411,170 @@ async def get_user_by_telegram_id(telegram_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+async def get_user_by_username(username: str) -> dict[str, Any] | None:
+    """Поиск пользователя по @username (без учёта регистра)."""
+    tag = username.strip().lstrip("@").lower()
+    if not tag:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE LOWER(username) = ?", (tag,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def set_user_default_profile(user_id: int, profile_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET default_profile_id = ? WHERE id = ?",
+            (profile_id, user_id),
+        )
+        await db.commit()
+
+
+async def clear_user_default_profile(user_id: int, profile_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE users SET default_profile_id = NULL
+            WHERE id = ? AND default_profile_id = ?
+            """,
+            (user_id, profile_id),
+        )
+        await db.commit()
+
+
+async def get_user_balance(user_id: int) -> float:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT balance FROM users WHERE id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        return float(row[0]) if row else 0.0
+
+
+async def add_user_balance(user_id: int, amount: float) -> float:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET balance = balance + ? WHERE id = ?",
+            (amount, user_id),
+        )
+        await db.commit()
+        cursor = await db.execute(
+            "SELECT balance FROM users WHERE id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        return float(row[0]) if row else 0.0
+
+
+async def deduct_user_balance(user_id: int, amount: float) -> bool:
+    """Списывает баланс. False — недостаточно средств."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT balance FROM users WHERE id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        if not row or float(row[0]) < amount:
+            return False
+        await db.execute(
+            "UPDATE users SET balance = balance - ? WHERE id = ?",
+            (amount, user_id),
+        )
+        await db.commit()
+        return True
+
+
+# ── Пополнение баланса ───────────────────────────────────────────────────────
+
+
+async def create_balance_topup(user_id: int, amount: float) -> int:
+    now = datetime.now().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO balance_topups (user_id, amount, status, created_at)
+            VALUES (?, ?, 'pending', ?)
+            """,
+            (user_id, amount, now),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def update_topup_payment(
+    topup_id: int,
+    *,
+    lava_invoice_id: str = "",
+    payment_url: str = "",
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE balance_topups
+            SET lava_invoice_id = COALESCE(NULLIF(?, ''), lava_invoice_id),
+                payment_url = COALESCE(NULLIF(?, ''), payment_url)
+            WHERE id = ?
+            """,
+            (lava_invoice_id, payment_url, topup_id),
+        )
+        await db.commit()
+
+
+async def get_topup(topup_id: int) -> dict[str, Any] | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM balance_topups WHERE id = ?", (topup_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def mark_topup_paid(topup_id: int) -> bool:
+    """Зачисляет пополнение на баланс. False если уже оплачено."""
+    now = datetime.now().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM balance_topups WHERE id = ?", (topup_id,)
+        )
+        row = await cursor.fetchone()
+        if not row or row["status"] == "paid":
+            return False
+        topup = dict(row)
+        await db.execute(
+            """
+            UPDATE balance_topups SET status = 'paid', paid_at = ?
+            WHERE id = ?
+            """,
+            (now, topup_id),
+        )
+        await db.execute(
+            "UPDATE users SET balance = balance + ? WHERE id = ?",
+            (topup["amount"], topup["user_id"]),
+        )
+        await db.commit()
+        return True
+
+
+async def get_topup_with_user(topup_id: int) -> dict[str, Any] | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT t.*, u.telegram_id, u.username
+            FROM balance_topups t
+            JOIN users u ON t.user_id = u.id
+            WHERE t.id = ?
+            """,
+            (topup_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
 # ── Профили ────────────────────────────────────────────────────────────────
 
 
@@ -408,14 +604,24 @@ async def create_profile(
     now = datetime.now().isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
+            "SELECT COUNT(*) FROM user_profiles WHERE user_id = ?", (user_id,)
+        )
+        count = (await cursor.fetchone())[0]
+        cursor = await db.execute(
             """
             INSERT INTO user_profiles (user_id, title, name, phone, address, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (user_id, title, name, phone, address, now),
         )
+        profile_id = cursor.lastrowid
+        if count == 0:
+            await db.execute(
+                "UPDATE users SET default_profile_id = ? WHERE id = ?",
+                (profile_id, user_id),
+            )
         await db.commit()
-        return cursor.lastrowid
+        return profile_id
 
 
 async def update_profile_field(profile_id: int, field: str, value: Any) -> None:
@@ -431,6 +637,19 @@ async def update_profile_field(profile_id: int, field: str, value: Any) -> None:
 
 async def delete_profile(profile_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT user_id FROM user_profiles WHERE id = ?", (profile_id,)
+        )
+        row = await cursor.fetchone()
+        if row:
+            user_id = row[0]
+            await db.execute(
+                """
+                UPDATE users SET default_profile_id = NULL
+                WHERE id = ? AND default_profile_id = ?
+                """,
+                (user_id, profile_id),
+            )
         await db.execute("DELETE FROM user_profiles WHERE id = ?", (profile_id,))
         await db.commit()
 
@@ -551,6 +770,15 @@ async def toggle_product_seasonal(product_id: int) -> bool:
         )
         await db.commit()
         return bool(new_value)
+
+
+async def set_product_seasonal(product_id: int, is_seasonal: bool) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE products SET is_seasonal = ? WHERE id = ?",
+            (int(is_seasonal), product_id),
+        )
+        await db.commit()
 
 
 async def delete_product(product_id: int) -> None:
@@ -715,14 +943,7 @@ async def close_order(order_id: int, reason: str) -> None:
             (reason, order_id),
         )
         if reason == "delivered":
-            now = datetime.now().isoformat()
-            await db.execute(
-                """
-                UPDATE billing SET status = 'paid', paid_at = ?
-                WHERE order_id = ?
-                """,
-                (now, order_id),
-            )
+            pass  # оплата через LAVA до доставки
         await db.commit()
 
 
@@ -833,10 +1054,67 @@ async def get_orders_for_yandex_sync() -> list[dict[str, Any]]:
             WHERE o.yandex_claim_id IS NOT NULL
               AND o.yandex_claim_id != ''
               AND o.status != 'closed'
+              AND EXISTS (
+                  SELECT 1 FROM billing b
+                  WHERE b.order_id = o.id AND b.status = 'paid'
+              )
             ORDER BY o.id
             """
         )
         return [dict(r) for r in await cursor.fetchall()]
+
+
+async def update_billing_payment(
+    order_id: int,
+    *,
+    lava_invoice_id: str = "",
+    payment_url: str = "",
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE billing
+            SET lava_invoice_id = COALESCE(NULLIF(?, ''), lava_invoice_id),
+                payment_url = COALESCE(NULLIF(?, ''), payment_url)
+            WHERE order_id = ?
+            """,
+            (lava_invoice_id, payment_url, order_id),
+        )
+        await db.commit()
+
+
+async def mark_billing_paid(
+    order_id: int, *, payment_method: str = "lava"
+) -> bool:
+    """Помечает счёт оплаченным. False если уже был оплачен."""
+    now = datetime.now().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT status FROM billing WHERE order_id = ?", (order_id,)
+        )
+        row = await cursor.fetchone()
+        if not row or row[0] == "paid":
+            return False
+        await db.execute(
+            """
+            UPDATE billing
+            SET status = 'paid', paid_at = ?, payment_method = ?
+            WHERE order_id = ?
+            """,
+            (now, payment_method, order_id),
+        )
+        await db.commit()
+        return True
+
+
+async def get_billing_by_order(order_id: int) -> dict[str, Any] | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM billing WHERE order_id = ?", (order_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
 
 # ── Рассылка ────────────────────────────────────────────────────────────────

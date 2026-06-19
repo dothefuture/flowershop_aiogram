@@ -28,15 +28,16 @@ from database import (
     get_support_thread_by_user,
     mark_support_read,
     set_order_yandex_claim,
+    set_product_seasonal,
     set_setting,
     set_product_discount,
     toggle_product_active,
-    toggle_product_seasonal,
     update_order_status,
     update_product_field,
 )
 from utils.auth import is_admin
 from keyboards.admin import (
+    admin_ai_confirm_kb,
     admin_broadcast_confirm_kb,
     admin_discount_kb,
     admin_edit_fields_kb,
@@ -46,7 +47,10 @@ from keyboards.admin import (
     admin_product_actions_kb,
     admin_products_kb,
     admin_seasonal_kb,
+    admin_seasonal_pick_kb,
+    admin_seasonal_products_kb,
     admin_support_threads_kb,
+    admin_welcome_kb,
 )
 from keyboards.main import main_menu_kb
 from notifications import (
@@ -55,17 +59,20 @@ from notifications import (
 )
 from states import (
     AdminAddProductStates,
+    AdminAIStates,
     AdminBroadcastStates,
     AdminDiscountStates,
     AdminEditProductStates,
     AdminSeasonalStates,
     AdminSupportStates,
+    AdminWelcomeStates,
     AdminYandexStates,
 )
 from texts import ADMIN_PANEL, ADMIN_PRODUCTS_HEADER, BROADCAST_DONE, BROADCAST_PREVIEW, SUPPORT_ADMIN_REPLY_SENT
 from utils.formatting import format_telegram_client
 from utils.pricing import effective_price, format_price_line, format_rub
 from services.yandex_delivery import format_yandex_status, get_yandex_client
+from services.ai_text import AIError, enhance_product_description
 
 router = Router(name="admin")
 
@@ -128,6 +135,18 @@ async def admin_noop(callback: CallbackQuery) -> None:
 # ── Сезонное ────────────────────────────────────────────────────────────────
 
 
+def _seasonal_menu_text(settings: dict[str, str]) -> str:
+    enabled = settings["enabled"] == "1"
+    emoji = settings.get("emoji", "🍂")
+    return (
+        f"<b>Сезонный раздел</b> «{settings['title']}»\n\n"
+        f"Статус: {'✅ включён' if enabled else '⛔ выключён'}\n"
+        f"Название: <b>{settings['title']}</b>\n"
+        f"Эмодзи в каталоге: {emoji}\n"
+        f"Цвет выделения: <code>{settings['color']}</code>"
+    )
+
+
 @router.callback_query(F.data == "admin:seasonal")
 async def admin_seasonal_menu(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
@@ -137,10 +156,13 @@ async def admin_seasonal_menu(callback: CallbackQuery, state: FSMContext) -> Non
     settings = await get_seasonal_settings()
     enabled = settings["enabled"] == "1"
     await callback.message.edit_text(
-        f"🍂 <b>Сезонный раздел «{settings['title']}»</b>\n\n"
-        f"Статус: {'✅ включён' if enabled else '⛔ выключён'}\n"
-        f"Цвет выделения: <code>{settings['color']}</code>",
-        reply_markup=admin_seasonal_kb(settings["color"], enabled),
+        _seasonal_menu_text(settings),
+        reply_markup=admin_seasonal_kb(
+            settings["color"],
+            enabled,
+            settings.get("emoji", "🍂"),
+            settings["title"],
+        ),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -157,13 +179,78 @@ async def admin_seasonal_toggle(callback: CallbackQuery) -> None:
     settings = await get_seasonal_settings()
     enabled = settings["enabled"] == "1"
     await callback.message.edit_text(
-        f"🍂 <b>Сезонный раздел «{settings['title']}»</b>\n\n"
-        f"Статус: {'✅ включён' if enabled else '⛔ выключён'}\n"
-        f"Цвет выделения: <code>{settings['color']}</code>",
-        reply_markup=admin_seasonal_kb(settings["color"], enabled),
+        _seasonal_menu_text(settings),
+        reply_markup=admin_seasonal_kb(
+            settings["color"],
+            enabled,
+            settings.get("emoji", "🍂"),
+            settings["title"],
+        ),
         parse_mode="HTML",
     )
     await callback.answer("Обновлено")
+
+
+@router.callback_query(F.data == "admin:seasonal_title")
+async def admin_seasonal_title_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    settings = await get_seasonal_settings()
+    await state.set_state(AdminSeasonalStates.title)
+    await callback.message.answer(
+        "Введите <b>название сезонного раздела</b>\n"
+        f"<i>Текущее: {settings['title']}</i>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminSeasonalStates.title)
+async def admin_seasonal_title_value(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    title = message.text.strip()
+    if len(title) < 2:
+        await message.answer("Название слишком короткое.")
+        return
+    await set_setting("seasonal_title", title[:40])
+    await state.clear()
+    await message.answer(
+        f"✅ Название сезонного раздела: <b>{title[:40]}</b>",
+        reply_markup=main_menu_kb(is_admin=True),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "admin:seasonal_emoji")
+async def admin_seasonal_emoji_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    await state.set_state(AdminSeasonalStates.emoji)
+    await callback.message.answer(
+        "Отправьте <b>один эмодзи</b> для сезонного раздела\n"
+        "<i>Например: 🍂 🌸 ❄️</i>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminSeasonalStates.emoji)
+async def admin_seasonal_emoji_value(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    emoji = message.text.strip()
+    if not emoji or len(emoji) > 8:
+        await message.answer("❌ Отправьте один эмодзи")
+        return
+    await set_setting("seasonal_emoji", emoji[:4])
+    await state.clear()
+    await message.answer(
+        f"✅ Эмодзи сезонного раздела: {emoji[:4]}",
+        reply_markup=main_menu_kb(is_admin=True),
+    )
 
 
 @router.callback_query(F.data == "admin:seasonal_color")
@@ -195,25 +282,75 @@ async def admin_seasonal_color_value(message: Message, state: FSMContext) -> Non
     )
 
 
-@router.callback_query(F.data.startswith("admin:seasonal_toggle:"))
-async def admin_product_seasonal_toggle(callback: CallbackQuery) -> None:
+@router.callback_query(F.data == "admin:seasonal_products")
+async def admin_seasonal_products(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    products = await get_all_products()
+    seasonal = [p for p in products if p.get("is_seasonal")]
+    settings = await get_seasonal_settings()
+    emoji = settings.get("emoji", "🍂")
+    await callback.message.edit_text(
+        f"{emoji} <b>Товары сезонного раздела</b>\n\n"
+        f"Нажмите ❌ чтобы убрать, ➕ чтобы добавить:",
+        reply_markup=admin_seasonal_products_kb(seasonal),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:seasonal_pick")
+async def admin_seasonal_pick(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    products = await get_all_products()
+    available = [p for p in products if not p.get("is_seasonal")]
+    await callback.message.edit_text(
+        "➕ <b>Добавить в сезонное</b>\n\nВыберите товар:",
+        reply_markup=admin_seasonal_pick_kb(available),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:seasonal_add:"))
+async def admin_seasonal_add_product(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
     product_id = int(callback.data.split(":")[-1])
-    new_val = await toggle_product_seasonal(product_id)
-    msg = "добавлен в сезонное" if new_val else "убран из сезонного"
-    await callback.answer(f"Товар {msg}", show_alert=True)
-    product = await get_product(product_id)
-    discount = int(product.get("discount_percent") or 0)
+    await set_product_seasonal(product_id, True)
+    await callback.answer("Добавлено в сезонное", show_alert=True)
+    products = await get_all_products()
+    seasonal = [p for p in products if p.get("is_seasonal")]
+    settings = await get_seasonal_settings()
+    emoji = settings.get("emoji", "🍂")
     await callback.message.edit_text(
-        _product_detail_text(product),
-        reply_markup=admin_product_actions_kb(
-            product_id,
-            bool(product["is_active"]),
-            discount,
-            bool(product.get("is_seasonal")),
-        ),
+        f"{emoji} <b>Товары сезонного раздела</b>\n\n"
+        f"Нажмите ❌ чтобы убрать, ➕ чтобы добавить:",
+        reply_markup=admin_seasonal_products_kb(seasonal),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("admin:seasonal_rm:"))
+async def admin_seasonal_remove_product(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    product_id = int(callback.data.split(":")[-1])
+    await set_product_seasonal(product_id, False)
+    await callback.answer("Убрано из сезонного", show_alert=True)
+    products = await get_all_products()
+    seasonal = [p for p in products if p.get("is_seasonal")]
+    settings = await get_seasonal_settings()
+    emoji = settings.get("emoji", "🍂")
+    await callback.message.edit_text(
+        f"{emoji} <b>Товары сезонного раздела</b>\n\n"
+        f"Нажмите ❌ чтобы убрать, ➕ чтобы добавить:",
+        reply_markup=admin_seasonal_products_kb(seasonal),
         parse_mode="HTML",
     )
 
@@ -928,3 +1065,180 @@ async def admin_support_reply_send(message: Message, state: FSMContext) -> None:
         SUPPORT_ADMIN_REPLY_SENT, reply_markup=main_menu_kb(is_admin=True)
     )
     await state.clear()
+
+
+# ── Главное меню ──────────────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data == "admin:welcome")
+async def admin_welcome_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    await state.clear()
+    from utils.welcome import get_welcome_text
+
+    text = await get_welcome_text()
+    preview = text if len(text) <= 200 else text[:200] + "…"
+    await callback.message.edit_text(
+        "🏠 <b>Главное меню</b>\n\n"
+        "Настройка приветствия при /start и кнопке «На главную».\n\n"
+        f"<b>Текущий текст:</b>\n{preview}",
+        reply_markup=admin_welcome_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:welcome_photo")
+async def admin_welcome_photo_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    await state.set_state(AdminWelcomeStates.photo)
+    await callback.message.answer(
+        "🖼 Отправьте <b>новую картинку</b> для главного меню:",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminWelcomeStates.photo, F.photo)
+async def admin_welcome_photo_save(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    photo_id = message.photo[-1].file_id
+    await set_setting("welcome_photo_file_id", photo_id)
+    await state.clear()
+    await message.answer(
+        "✅ Картинка главного меню обновлена. Проверьте /start",
+        reply_markup=main_menu_kb(is_admin=True),
+    )
+
+
+@router.callback_query(F.data == "admin:welcome_text")
+async def admin_welcome_text_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    from texts import WELCOME
+
+    await state.set_state(AdminWelcomeStates.text)
+    await callback.message.answer(
+        "📝 Отправьте <b>новый текст</b> главного меню.\n\n"
+        "Поддерживается HTML: <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>\n\n"
+        f"<i>Пример по умолчанию:</i>\n{WELCOME}",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminWelcomeStates.text)
+async def admin_welcome_text_save(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if len(text) < 5:
+        await message.answer("Текст слишком короткий.")
+        return
+    await set_setting("welcome_text", text[:2000])
+    await state.clear()
+    await message.answer(
+        "✅ Текст главного меню обновлён. Проверьте /start",
+        reply_markup=main_menu_kb(is_admin=True),
+    )
+
+
+@router.message(AdminWelcomeStates.photo)
+async def admin_welcome_photo_invalid(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer("❌ Отправьте изображение (фото).")
+
+
+# ── AI описание товара ────────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("admin:ai_desc:"))
+async def admin_ai_desc_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    product_id = int(callback.data.split(":")[-1])
+    await state.update_data(ai_product_id=product_id)
+    await state.set_state(AdminAIStates.hint)
+    await callback.message.answer(
+        "✨ <b>AI-описание</b>\n\n"
+        "Введите пожелание для AI (или «-» без дополнений):",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminAIStates.hint)
+async def admin_ai_desc_generate(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    product_id = data["ai_product_id"]
+    product = await get_product(product_id)
+    if not product:
+        await state.clear()
+        await message.answer("Товар не найден.")
+        return
+
+    hint = message.text.strip()
+    if hint == "-":
+        hint = ""
+
+    await message.answer(
+        "⏳ Cursor AI дописывает описание…\n"
+        "<i>Обычно 30–120 секунд.</i>",
+        parse_mode="HTML",
+    )
+    try:
+        new_desc = await enhance_product_description(
+            product["name"],
+            product["description"],
+            product["price"],
+            extra_hint=hint,
+        )
+    except AIError as exc:
+        await message.answer(
+            f"❌ {exc}",
+            reply_markup=main_menu_kb(is_admin=True),
+            parse_mode="HTML",
+        )
+        await state.clear()
+        return
+
+    await state.update_data(ai_new_description=new_desc)
+    await state.set_state(AdminAIStates.confirm)
+    await message.answer(
+        f"✨ <b>Новое описание:</b>\n\n{new_desc}",
+        reply_markup=admin_ai_confirm_kb(product_id),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("admin:ai_apply:"))
+async def admin_ai_desc_apply(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    product_id = int(callback.data.split(":")[-1])
+    data = await state.get_data()
+    new_desc = data.get("ai_new_description")
+    if not new_desc:
+        await callback.answer("Нет текста для сохранения", show_alert=True)
+        return
+    await update_product_field(product_id, "description", new_desc)
+    await state.clear()
+    await callback.message.edit_text(
+        "✏️ <b>Редактирование товара</b>\n\n"
+        "✅ Описание обновлено через AI.\n"
+        "Выберите поле:",
+        reply_markup=admin_edit_fields_kb(product_id),
+        parse_mode="HTML",
+    )
+    await callback.answer("Описание обновлено")

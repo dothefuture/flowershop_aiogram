@@ -30,7 +30,7 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="🍂 Сезонное",
+                    text="Сезонное",
                     callback_data="admin:seasonal",
                 )
             ],
@@ -48,6 +48,12 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="💳 Счета",
                     callback_data="admin:billing",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏠 Главное меню",
+                    callback_data="admin:welcome",
                 )
             ],
             [
@@ -96,9 +102,6 @@ def admin_product_actions_kb(
 ) -> InlineKeyboardMarkup:
     """Действия над конкретным товаром."""
     hide_text = "👁‍🗨 Скрыть из каталога" if is_active else "✅ Показать в каталоге"
-    seasonal_text = (
-        "🍂 Убрать из сезонного" if is_seasonal else "🍂 В раздел СЕЗОННОЕ"
-    )
     discount_text = (
         f"🏷 Скидка: {discount}% (изменить)"
         if discount > 0
@@ -116,12 +119,6 @@ def admin_product_actions_kb(
                 InlineKeyboardButton(
                     text=discount_text,
                     callback_data=f"admin:discount:{product_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=seasonal_text,
-                    callback_data=f"admin:seasonal_toggle:{product_id}",
                 )
             ],
             [
@@ -159,6 +156,12 @@ def admin_edit_fields_kb(product_id: int) -> InlineKeyboardMarkup:
                     text="📄 Описание",
                     callback_data=f"admin:edit_field:{product_id}:description",
                 ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✨ AI: описание",
+                    callback_data=f"admin:ai_desc:{product_id}",
+                )
             ],
             [
                 InlineKeyboardButton(
@@ -320,11 +323,46 @@ def admin_order_status_kb(order_id: int, order: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def admin_seasonal_kb(color: str, enabled: bool) -> InlineKeyboardMarkup:
+def admin_welcome_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🖼 Картинка",
+                    callback_data="admin:welcome_photo",
+                ),
+                InlineKeyboardButton(
+                    text="📝 Текст",
+                    callback_data="admin:welcome_text",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data="admin:menu",
+                )
+            ],
+        ]
+    )
+
+
+def admin_seasonal_kb(color: str, enabled: bool, emoji: str, title: str) -> InlineKeyboardMarkup:
     """Настройки сезонного раздела."""
     toggle = "⛔ Выключить раздел" if enabled else "✅ Включить раздел"
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Название: {title[:20]}",
+                    callback_data="admin:seasonal_title",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Эмодзи: {emoji}",
+                    callback_data="admin:seasonal_emoji",
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text=f"🎨 Цвет: {color}",
@@ -339,12 +377,83 @@ def admin_seasonal_kb(color: str, enabled: bool) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="📦 Товары сезонного",
+                    callback_data="admin:seasonal_products",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="◀️ Назад",
                     callback_data="admin:menu",
                 )
             ],
         ]
     )
+
+
+def admin_seasonal_products_kb(products: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for p in products:
+        name = p["name"]
+        if len(name) > 28:
+            name = name[:27] + "…"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"❌ {name}",
+                    callback_data=f"admin:seasonal_rm:{p['id']}",
+                )
+            ]
+        )
+    if not rows:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="— пока пусто —",
+                    callback_data="admin:noop",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="➕ Добавить товар",
+                callback_data="admin:seasonal_pick",
+            )
+        ]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:seasonal")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_seasonal_pick_kb(products: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for p in products:
+        if p.get("is_seasonal"):
+            continue
+        name = p["name"]
+        if not p.get("is_active"):
+            name = f"👁 {name}"
+        if len(name) > 30:
+            name = name[:29] + "…"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=name,
+                    callback_data=f"admin:seasonal_add:{p['id']}",
+                )
+            ]
+        )
+    if not rows:
+        rows.append(
+            [InlineKeyboardButton(text="— все уже в сезонном —", callback_data="admin:noop")]
+        )
+    rows.append(
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:seasonal_products")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_broadcast_confirm_kb() -> InlineKeyboardMarkup:
@@ -385,3 +494,20 @@ def admin_support_threads_kb(threads: list[dict]) -> InlineKeyboardMarkup:
         )
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_ai_confirm_kb(product_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Применить",
+                    callback_data=f"admin:ai_apply:{product_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=f"admin:product:{product_id}",
+                ),
+            ]
+        ]
+    )
